@@ -1,0 +1,12 @@
+{
+  "name": "snapctx",
+  "version": "1.0.0",
+  "description": "CLI to save and restore developer environment snapshots.",
+  "type": "commonjs",
+  "bin": {
+    "snapctx": "./bin/snapctx.js"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  }
+}
