@@ -1,0 +1,351 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const { createTempHome } = require('./helpers/temp-home');
+const { runCli } = require('./helpers/run-cli');
+
+function withTempHome(fn) {
+  return async (t) => {
+    const { homeDir, cleanup } = createTempHome();
+    t.after(cleanup);
+    await fn(t, { homeDir });
+  };
+}
+
+test('save, load, and list still work', withTempHome(async (t, { homeDir }) => {
+  const save = runCli(['save', 'baseline'], { homeDir });
+  assert.equal(save.status, 0);
+  assert.match(save.stdout, /Snapshot 'baseline' saved\./);
+
+  const list = runCli(['list'], { homeDir });
+  assert.equal(list.status, 0);
+  assert.match(list.stdout, /baseline — saved/);
+
+  const load = runCli(['load', 'baseline'], { homeDir });
+  assert.equal(load.status, 0);
+  assert.match(load.stdout, /Snapshot: baseline/);
+}));
+
+test('delete removes an existing snapshot and fails for missing names', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'to-delete'], { homeDir });
+
+  const deleted = runCli(['delete', 'to-delete'], { homeDir });
+  assert.equal(deleted.status, 0);
+  assert.match(deleted.stdout, /deleted\./);
+
+  const missing = runCli(['delete', 'missing'], { homeDir });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /No snapshot named 'missing'/);
+}));
+
+test('save tags are searchable and filterable via list --tag', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'mywork', '-t', 'backend', '-t', 'urgent'], { homeDir });
+  runCli(['save', 'other', '-t', 'frontend'], { homeDir });
+
+  const taggedList = runCli(['list', '--tag', 'backend'], { homeDir });
+  assert.equal(taggedList.status, 0);
+  assert.match(taggedList.stdout, /mywork \[backend, urgent\]/);
+  assert.doesNotMatch(taggedList.stdout, /other/);
+
+  const search = runCli(['search', 'urgent'], { homeDir });
+  assert.equal(search.status, 0);
+  assert.match(search.stdout, /mywork \[backend, urgent\]/);
+}));
+
+test('diff reports key names but never env values', withTempHome(async (t, { homeDir }) => {
+  delete require.cache[require.resolve('../lib/storage')];
+  process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
+  const storage = require('../lib/storage');
+
+  const base = {
+    cwd: '/project/a',
+    env: { PATH: '/usr/bin', SECRET: 'supersecret' },
+    gitBranch: 'main',
+    recentCommands: ['npm test'],
+    tags: [],
+    timestamp: '2024-01-01T00:00:00.000Z',
+  };
+
+  storage.saveSnapshot('left', base);
+  storage.saveSnapshot('right', {
+    ...base,
+    cwd: '/project/b',
+    gitBranch: 'dev',
+    env: { PATH: '/usr/bin', SECRET: 'different-secret', DEBUG: '1' },
+    recentCommands: ['npm test', 'npm run lint'],
+  });
+
+  const diff = runCli(['diff', 'left', 'right'], { homeDir });
+  assert.equal(diff.status, 0);
+  assert.match(diff.stdout, /cwd: \/project\/a -> \/project\/b/);
+  assert.match(diff.stdout, /git branch: main -> dev/);
+  assert.match(diff.stdout, /DEBUG/);
+  assert.match(diff.stdout, /changed: SECRET/);
+  assert.doesNotMatch(diff.stdout, /supersecret/);
+  assert.doesNotMatch(diff.stdout, /different-secret/);
+  assert.match(diff.stdout, /recent commands: differ/);
+}));
+
+test('export and import round-trip with validation and force behavior', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'portable'], { homeDir });
+
+  const exportDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'snapctx-export-'));
+  t.after(() => {
+    fs.rmSync(exportDir, { recursive: true, force: true });
+  });
+
+  const exportPath = path.join(exportDir, 'portable.snapctx.json');
+  const exported = runCli(['export', 'portable', '-o', exportPath], { homeDir, cwd: exportDir });
+  assert.equal(exported.status, 0);
+  assert.ok(fs.existsSync(exportPath));
+
+  const imported = runCli(['import', exportPath, '--as', 'imported-copy'], { homeDir, cwd: exportDir });
+  assert.equal(imported.status, 0);
+  assert.match(imported.stdout, /imported as 'imported-copy'/);
+
+  const duplicate = runCli(['import', exportPath, '--as', 'imported-copy'], { homeDir, cwd: exportDir });
+  assert.equal(duplicate.status, 1);
+  assert.match(duplicate.stderr, /already exists/);
+
+  const forced = runCli(['import', exportPath, '--as', 'imported-copy', '--force'], { homeDir, cwd: exportDir });
+  assert.equal(forced.status, 0);
+
+  const malformedPath = path.join(exportDir, 'bad.snapctx.json');
+  fs.writeFileSync(malformedPath, JSON.stringify({ cwd: '/tmp' }), 'utf8');
+  const malformed = runCli(['import', malformedPath], { homeDir, cwd: exportDir });
+  assert.equal(malformed.status, 1);
+  assert.match(malformed.stderr, /Missing fields/);
+}));
+
+test('old-format fixture loads and lists without errors', withTempHome(async (t, { homeDir }) => {
+  const fixturePath = path.join(__dirname, 'fixtures', 'old-format.json');
+  const fixture = fs.readFileSync(fixturePath, 'utf8');
+  const snapDir = path.join(homeDir, '.snapctx');
+  fs.mkdirSync(snapDir, { recursive: true });
+  fs.writeFileSync(path.join(snapDir, 'legacy.json'), fixture, 'utf8');
+
+  const list = runCli(['list'], { homeDir });
+  assert.equal(list.status, 0);
+  assert.match(list.stdout, /legacy — saved/);
+
+  const load = runCli(['load', 'legacy'], { homeDir });
+  assert.equal(load.status, 0);
+  assert.match(load.stdout, /Snapshot: legacy/);
+  assert.doesNotMatch(load.stdout, /Tags:/);
+}));
+
+test('search reports when nothing matches', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'alpha'], { homeDir });
+  const search = runCli(['search', 'does-not-exist'], { homeDir });
+  assert.equal(search.status, 0);
+  assert.match(search.stdout, /No snapshots match 'does-not-exist'/);
+}));
+
+test('diff fails clearly when a snapshot is missing', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'only-one'], { homeDir });
+  const diff = runCli(['diff', 'only-one', 'missing'], { homeDir });
+  assert.equal(diff.status, 1);
+  assert.match(diff.stderr, /No snapshot named 'missing'/);
+}));
+
+test('export to a directory writes the file inside with the default name', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'mysnap'], { homeDir });
+
+  const exportDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'snapctx-dir-export-'));
+  t.after(() => {
+    fs.rmSync(exportDir, { recursive: true, force: true });
+  });
+
+  const result = runCli(['export', 'mysnap', '-o', exportDir], { homeDir, cwd: exportDir });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /exported to/);
+
+  // File should exist inside the directory with the default name.
+  const expectedFile = path.join(exportDir, 'mysnap.snapctx.json');
+  assert.ok(fs.existsSync(expectedFile));
+}));
+
+test('export with missing parent directory fails with clear message', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'mysnap'], { homeDir });
+
+  const exportDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'snapctx-missing-parent-'));
+  t.after(() => {
+    fs.rmSync(exportDir, { recursive: true, force: true });
+  });
+
+  const missingParentPath = path.join(exportDir, 'nonexistent', 'subdir', 'output.snapctx.json');
+  const result = runCli(['export', 'mysnap', '-o', missingParentPath], { homeDir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Parent directory does not exist/);
+  assert.doesNotMatch(result.stderr, /Error:/);
+  assert.doesNotMatch(result.stderr, /at /);
+}));
+
+test('import fails clearly when given a directory instead of a file', withTempHome(async (t, { homeDir }) => {
+  const importDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'snapctx-import-dir-'));
+  t.after(() => {
+    fs.rmSync(importDir, { recursive: true, force: true });
+  });
+
+  const result = runCli(['import', importDir], { homeDir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /is a directory, not a snapshot file/);
+  assert.doesNotMatch(result.stderr, /Error:/);
+  assert.doesNotMatch(result.stderr, /at /);
+}));
+
+test('import fails clearly when file does not exist', withTempHome(async (t, { homeDir }) => {
+  const result = runCli(['import', '/nonexistent/path/file.snapctx.json'], { homeDir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /not found/);
+  assert.doesNotMatch(result.stderr, /Error:/);
+  assert.doesNotMatch(result.stderr, /at /);
+}));
+
+test('PowerShell history: saves and loads recent commands from PSReadLine file', withTempHome(async (t, { homeDir }) => {
+  // Create a fake PSReadLine history file with some commands.
+  const psReadLineDir = path.join(homeDir, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine');
+  fs.mkdirSync(psReadLineDir, { recursive: true });
+  const historyFile = path.join(psReadLineDir, 'ConsoleHost_history.txt');
+  const commands = ['Get-ChildItem', 'Set-Location Desktop', 'Write-Host Hello', 'npm test'];
+  fs.writeFileSync(historyFile, commands.join('\n'), 'utf8');
+
+  // Simulate Windows environment: unset SHELL, set APPDATA to match.
+  // Note: runCli sets HOME and USERPROFILE. We need to override the env to point APPDATA correctly.
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+    SHELL: '', // Ensure SHELL is empty to trigger PowerShell path detection
+    NO_COLOR: '1',
+  };
+
+  // We need to run the CLI with the custom APPDATA.
+  const { spawnSync } = require('child_process');
+  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+
+  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'ps-test'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Snapshot 'ps-test' saved/);
+
+  // Now load and verify the commands are captured.
+  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'ps-test'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(loadResult.status, 0);
+  assert.match(loadResult.stdout, /Get-ChildItem/);
+  assert.match(loadResult.stdout, /npm test/);
+}));
+
+test('PowerShell history: missing PSReadLine file falls back gracefully with explanatory message', withTempHome(async (t, { homeDir }) => {
+  // Set up Windows environment but with no PSReadLine history file.
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+    SHELL: '', // Ensure SHELL is empty
+    NO_COLOR: '1',
+  };
+
+  const { spawnSync } = require('child_process');
+  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+
+  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-history'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0);
+
+  // Load and verify the explanatory message is shown instead of bare "(none)".
+  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-history'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(loadResult.status, 0);
+  assert.match(loadResult.stdout, /\(none — could not read shell history\)/);
+}));
+
+test('PowerShell history: APPDATA unset falls back gracefully', withTempHome(async (t, { homeDir }) => {
+  // Windows environment but APPDATA is unset (edge case).
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    SHELL: '',
+    NO_COLOR: '1',
+  };
+  delete env.APPDATA;
+
+  const { spawnSync } = require('child_process');
+  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+
+  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-appdata'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Snapshot 'no-appdata' saved/);
+
+  // Load and verify it doesn't crash.
+  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-appdata'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(loadResult.status, 0);
+  assert.match(loadResult.stdout, /Recent commands:/);
+}));
+
+test('bash/zsh history capture unchanged: still works with SHELL env var', withTempHome(async (t, { homeDir }) => {
+  // Ensure bash history capture still works when SHELL is properly set.
+  const bashHistoryPath = path.join(homeDir, '.bash_history');
+  fs.writeFileSync(bashHistoryPath, 'echo hello\nls -la\ncd /tmp\n', 'utf8');
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    SHELL: '/bin/bash',
+    NO_COLOR: '1',
+  };
+
+  const { spawnSync } = require('child_process');
+  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+
+  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'bash-test'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0);
+
+  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'bash-test'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(loadResult.status, 0);
+  assert.match(loadResult.stdout, /echo hello/);
+  assert.match(loadResult.stdout, /ls -la/);
+}));
