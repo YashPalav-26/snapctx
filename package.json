@@ -1,12 +1,47 @@
 {
   "name": "snapctx",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CLI to save and restore developer environment snapshots.",
   "type": "commonjs",
+  "keywords": [
+    "cli",
+    "context",
+    "snapshot",
+    "dev-tools",
+    "git"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YashPalav-26/snapctx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YashPalav-26/snapctx/issues"
+  },
+  "homepage": "https://github.com/YashPalav-26/snapctx#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "snapctx": "./bin/snapctx.js"
   },
+  "scripts": {
+    "test": "node --test test/**/*.test.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
   "dependencies": {
     "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.5.0"
   }
 }
