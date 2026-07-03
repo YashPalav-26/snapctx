@@ -1,0 +1,11 @@
+{
+  "cwd": "/Users/dev/legacy-project",
+  "env": {
+    "PATH": "/usr/bin"
+  },
+  "gitBranch": "main",
+  "recentCommands": [
+    "npm test"
+  ],
+  "timestamp": "2024-01-15T10:00:00.000Z"
+}
