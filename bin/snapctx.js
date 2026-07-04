@@ -25,8 +25,6 @@ function resolveHistoryPath() {
   const zshHistory = path.join(os.homedir(), '.zsh_history');
   const bashHistory = path.join(os.homedir(), '.bash_history');
 
-  // Detect POSIX shells (bash, zsh) explicitly via SHELL env var or file existence.
-  // SHELL is a POSIX convention and should be reliable when set, but on Windows it's typically absent.
   if (shell.includes('zsh')) {
     return zshHistory;
   }
@@ -40,27 +38,21 @@ function resolveHistoryPath() {
     return bashHistory;
   }
 
-  // On Windows without a POSIX shell environment, check for PowerShell PSReadLine history.
-  // PSReadLine (used by both Windows PowerShell 5.x and PowerShell 7+/pwsh) stores command history here.
-  if (process.platform === 'win32') {
-    const appdata = process.env.APPDATA;
-    if (appdata) {
-      const psReadLineHistory = path.join(
-        appdata,
-        'Microsoft',
-        'Windows',
-        'PowerShell',
-        'PSReadLine',
-        'ConsoleHost_history.txt',
-      );
-      if (fs.existsSync(psReadLineHistory)) {
-        return psReadLineHistory;
-      }
+  const appdata = process.env.APPDATA;
+  if (appdata) {
+    const psReadLineHistory = path.join(
+      appdata,
+      'Microsoft',
+      'Windows',
+      'PowerShell',
+      'PSReadLine',
+      'ConsoleHost_history.txt',
+    );
+    if (fs.existsSync(psReadLineHistory)) {
+      return psReadLineHistory;
     }
   }
 
-  // No shell history file found. This is normal for cmd.exe (which has no persistent history file)
-  // and for any shell environment where history capture is disabled or hasn't been used yet.
   return null;
 }
 
