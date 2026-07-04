@@ -205,114 +205,144 @@ test('import fails clearly when file does not exist', withTempHome(async (t, { h
 }));
 
 test('PowerShell history: saves and loads recent commands from PSReadLine file', withTempHome(async (t, { homeDir }) => {
-  // Create a fake PSReadLine history file with some commands.
-  const psReadLineDir = path.join(homeDir, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine');
-  fs.mkdirSync(psReadLineDir, { recursive: true });
-  const historyFile = path.join(psReadLineDir, 'ConsoleHost_history.txt');
-  const commands = ['Get-ChildItem', 'Set-Location Desktop', 'Write-Host Hello', 'npm test'];
-  fs.writeFileSync(historyFile, commands.join('\n'), 'utf8');
+  // Save original platform for restoration
+  const originalPlatform = process.platform;
+  // Mock Windows platform to trigger PowerShell detection
+  process.platform = 'win32';
 
-  // Simulate Windows environment: unset SHELL, set APPDATA to match.
-  // Note: runCli sets HOME and USERPROFILE. We need to override the env to point APPDATA correctly.
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
-    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
-    SHELL: '', // Ensure SHELL is empty to trigger PowerShell path detection
-    NO_COLOR: '1',
-  };
+  try {
+    // Create a fake PSReadLine history file with some commands.
+    const psReadLineDir = path.join(homeDir, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine');
+    fs.mkdirSync(psReadLineDir, { recursive: true });
+    const historyFile = path.join(psReadLineDir, 'ConsoleHost_history.txt');
+    const commands = ['Get-ChildItem', 'Set-Location Desktop', 'Write-Host Hello', 'npm test'];
+    fs.writeFileSync(historyFile, commands.join('\n'), 'utf8');
 
-  // We need to run the CLI with the custom APPDATA.
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+    // Simulate Windows environment: unset SHELL, set APPDATA to match.
+    // Note: runCli sets HOME and USERPROFILE. We need to override the env to point APPDATA correctly.
+    const env = {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+      SHELL: '', // Ensure SHELL is empty to trigger PowerShell path detection
+      NO_COLOR: '1',
+    };
 
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'ps-test'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
+    // We need to run the CLI with the custom APPDATA.
+    const { spawnSync } = require('child_process');
+    const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
 
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /Snapshot 'ps-test' saved/);
+    const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'ps-test'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
 
-  // Now load and verify the commands are captured.
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'ps-test'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Snapshot 'ps-test' saved/);
 
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /Get-ChildItem/);
-  assert.match(loadResult.stdout, /npm test/);
+    // Now load and verify the commands are captured.
+    const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'ps-test'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
+
+    assert.equal(loadResult.status, 0);
+    assert.match(loadResult.stdout, /Get-ChildItem/);
+    assert.match(loadResult.stdout, /npm test/);
+  } finally {
+    // Restore original platform
+    process.platform = originalPlatform;
+  }
 }));
 
 test('PowerShell history: missing PSReadLine file falls back gracefully with explanatory message', withTempHome(async (t, { homeDir }) => {
-  // Set up Windows environment but with no PSReadLine history file.
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
-    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
-    SHELL: '', // Ensure SHELL is empty
-    NO_COLOR: '1',
-  };
+  // Save original platform for restoration
+  const originalPlatform = process.platform;
+  // Mock Windows platform to trigger PowerShell detection
+  process.platform = 'win32';
 
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+  try {
+    // Set up Windows environment but with no PSReadLine history file.
+    const env = {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+      SHELL: '', // Ensure SHELL is empty
+      NO_COLOR: '1',
+    };
 
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-history'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
+    const { spawnSync } = require('child_process');
+    const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
 
-  assert.equal(result.status, 0);
+    const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-history'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
 
-  // Load and verify the explanatory message is shown instead of bare "(none)".
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-history'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
+    assert.equal(result.status, 0);
 
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /\(none — could not read shell history\)/);
+    // Load and verify the explanatory message is shown instead of bare "(none)".
+    const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-history'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
+
+    assert.equal(loadResult.status, 0);
+    assert.match(loadResult.stdout, /\(none — could not read shell history\)/);
+  } finally {
+    // Restore original platform
+    process.platform = originalPlatform;
+  }
 }));
 
 test('PowerShell history: APPDATA unset falls back gracefully', withTempHome(async (t, { homeDir }) => {
-  // Windows environment but APPDATA is unset (edge case).
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
-    SHELL: '',
-    NO_COLOR: '1',
-  };
-  delete env.APPDATA;
+  // Save original platform for restoration
+  const originalPlatform = process.platform;
+  // Mock Windows platform to trigger PowerShell detection
+  process.platform = 'win32';
 
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+  try {
+    // Windows environment but APPDATA is unset (edge case).
+    const env = {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      SHELL: '',
+      NO_COLOR: '1',
+    };
+    delete env.APPDATA;
 
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-appdata'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
+    const { spawnSync } = require('child_process');
+    const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
 
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /Snapshot 'no-appdata' saved/);
+    const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-appdata'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
 
-  // Load and verify it doesn't crash.
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-appdata'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Snapshot 'no-appdata' saved/);
 
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /Recent commands:/);
+    // Load and verify it doesn't crash.
+    const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-appdata'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
+
+    assert.equal(loadResult.status, 0);
+    assert.match(loadResult.stdout, /Recent commands:/);
+  } finally {
+    // Restore original platform
+    process.platform = originalPlatform;
+  }
 }));
 
 test('bash/zsh history capture unchanged: still works with SHELL env var', withTempHome(async (t, { homeDir }) => {
