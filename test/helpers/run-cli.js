@@ -3,12 +3,13 @@ const path = require('path');
 
 const CLI_PATH = path.join(__dirname, '..', '..', 'bin', 'snapctx.js');
 
-function runCli(args, { homeDir, cwd } = {}) {
+function runCli(args, { homeDir, cwd, env: customEnv } = {}) {
   const env = {
     ...process.env,
     HOME: homeDir,
     USERPROFILE: homeDir,
     NO_COLOR: '1',
+    ...customEnv,
   };
 
   const result = spawnSync(process.execPath, [CLI_PATH, ...args], {

@@ -212,107 +212,54 @@ test('PowerShell history: saves and loads recent commands from PSReadLine file',
   const commands = ['Get-ChildItem', 'Set-Location Desktop', 'Write-Host Hello', 'npm test'];
   fs.writeFileSync(historyFile, commands.join('\n'), 'utf8');
 
-  // Simulate Windows environment: unset SHELL, set APPDATA to match.
-  // Note: runCli sets HOME and USERPROFILE. We need to override the env to point APPDATA correctly.
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
+  // Simulate Windows environment: APPDATA points to the fake home, SHELL is empty to trigger PowerShell detection.
+  const customEnv = {
     APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
-    SHELL: '', // Ensure SHELL is empty to trigger PowerShell path detection
-    NO_COLOR: '1',
+    SHELL: '', // Empty SHELL signals "not a POSIX shell" to CLI detection logic
   };
 
-  // We need to run the CLI with the custom APPDATA.
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+  const save = runCli(['save', 'ps-test'], { homeDir, env: customEnv });
+  assert.equal(save.status, 0);
+  assert.match(save.stdout, /Snapshot 'ps-test' saved/);
 
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'ps-test'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /Snapshot 'ps-test' saved/);
-
-  // Now load and verify the commands are captured.
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'ps-test'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /Get-ChildItem/);
-  assert.match(loadResult.stdout, /npm test/);
+  // Load and verify the commands are captured.
+  const load = runCli(['load', 'ps-test'], { homeDir, env: customEnv });
+  assert.equal(load.status, 0);
+  assert.match(load.stdout, /Get-ChildItem/);
+  assert.match(load.stdout, /npm test/);
 }));
 
 test('PowerShell history: missing PSReadLine file falls back gracefully with explanatory message', withTempHome(async (t, { homeDir }) => {
   // Set up Windows environment but with no PSReadLine history file.
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
+  const customEnv = {
     APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
-    SHELL: '', // Ensure SHELL is empty
-    NO_COLOR: '1',
+    SHELL: '', // Empty SHELL signals "not a POSIX shell" to CLI detection logic
   };
 
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
-
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-history'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(result.status, 0);
+  const save = runCli(['save', 'no-history'], { homeDir, env: customEnv });
+  assert.equal(save.status, 0);
 
   // Load and verify the explanatory message is shown instead of bare "(none)".
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-history'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /\(none — could not read shell history\)/);
+  const load = runCli(['load', 'no-history'], { homeDir, env: customEnv });
+  assert.equal(load.status, 0);
+  assert.match(load.stdout, /\(none — could not read shell history\)/);
 }));
 
 test('PowerShell history: APPDATA unset falls back gracefully', withTempHome(async (t, { homeDir }) => {
   // Windows environment but APPDATA is unset (edge case).
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
+  const customEnv = {
     SHELL: '',
-    NO_COLOR: '1',
   };
-  delete env.APPDATA;
+  // APPDATA is intentionally not set in customEnv
 
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
-
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'no-appdata'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /Snapshot 'no-appdata' saved/);
+  const save = runCli(['save', 'no-appdata'], { homeDir, env: customEnv });
+  assert.equal(save.status, 0);
+  assert.match(save.stdout, /Snapshot 'no-appdata' saved/);
 
   // Load and verify it doesn't crash.
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'no-appdata'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /Recent commands:/);
+  const load = runCli(['load', 'no-appdata'], { homeDir, env: customEnv });
+  assert.equal(load.status, 0);
+  assert.match(load.stdout, /Recent commands:/);
 }));
 
 test('bash/zsh history capture unchanged: still works with SHELL env var', withTempHome(async (t, { homeDir }) => {
@@ -320,32 +267,15 @@ test('bash/zsh history capture unchanged: still works with SHELL env var', withT
   const bashHistoryPath = path.join(homeDir, '.bash_history');
   fs.writeFileSync(bashHistoryPath, 'echo hello\nls -la\ncd /tmp\n', 'utf8');
 
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
+  const customEnv = {
     SHELL: '/bin/bash',
-    NO_COLOR: '1',
   };
 
-  const { spawnSync } = require('child_process');
-  const CLI_PATH = path.join(__dirname, '..', 'bin', 'snapctx.js');
+  const save = runCli(['save', 'bash-test'], { homeDir, env: customEnv });
+  assert.equal(save.status, 0);
 
-  const result = spawnSync(process.execPath, [CLI_PATH, 'save', 'bash-test'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(result.status, 0);
-
-  const loadResult = spawnSync(process.execPath, [CLI_PATH, 'load', 'bash-test'], {
-    cwd: process.cwd(),
-    env,
-    encoding: 'utf8',
-  });
-
-  assert.equal(loadResult.status, 0);
-  assert.match(loadResult.stdout, /echo hello/);
-  assert.match(loadResult.stdout, /ls -la/);
+  const load = runCli(['load', 'bash-test'], { homeDir, env: customEnv });
+  assert.equal(load.status, 0);
+  assert.match(load.stdout, /echo hello/);
+  assert.match(load.stdout, /ls -la/);
 }));
