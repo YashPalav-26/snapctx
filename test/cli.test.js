@@ -133,6 +133,7 @@ test('old-format fixture loads and lists without errors', withTempHome(async (t,
   const load = runCli(['load', 'legacy'], { homeDir });
   assert.equal(load.status, 0);
   assert.match(load.stdout, /Snapshot: legacy/);
+  assert.match(load.stdout, /Environment variables: 1 saved \(unknown\/legacy\)/);
   assert.doesNotMatch(load.stdout, /Tags:/);
 }));
 
@@ -278,4 +279,55 @@ test('bash/zsh history capture unchanged: still works with SHELL env var', withT
   assert.equal(load.status, 0);
   assert.match(load.stdout, /echo hello/);
   assert.match(load.stdout, /ls -la/);
+}));
+
+test('cli: default redaction is on and prints redacted count', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    AWS_SECRET_ACCESS_KEY: 'secret',
+    SAFE_ENV_VAR: 'safe',
+  };
+  const result = runCli(['save', 'test-redacted'], { homeDir, env });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Redacted \d+ environment variables/);
+
+  // Check load output:
+  const loadResult = runCli(['load', 'test-redacted'], { homeDir, env });
+  assert.equal(loadResult.status, 0);
+  assert.match(loadResult.stdout, /Environment variables: \d+ saved \(redacted\)/);
+}));
+
+test('cli: --no-redact disables redaction and warns', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    AWS_SECRET_ACCESS_KEY: 'secret',
+    SAFE_ENV_VAR: 'safe',
+  };
+  const result = runCli(['save', 'test-unredacted', '--no-redact'], { homeDir, env });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /saving environment variables without redaction/);
+  assert.doesNotMatch(result.stdout, /Redacted/);
+
+  // Check load output:
+  const loadResult = runCli(['load', 'test-unredacted'], { homeDir, env });
+  assert.equal(loadResult.status, 0);
+  assert.match(loadResult.stdout, /Environment variables: \d+ saved \(unredacted\)/);
+}));
+
+test('cli: --exclude adds a one-off exclusion pattern', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    MY_CUSTOM_VAR: 'secret',
+    SAFE_ENV_VAR: 'safe',
+  };
+  // Standard save shouldn't redact MY_CUSTOM_VAR
+  const res1 = runCli(['save', 'normal-save'], { homeDir, env });
+  assert.equal(res1.status, 0);
+  const match1 = res1.stdout.match(/Redacted (\d+) environment variables/);
+  const normalCount = match1 ? parseInt(match1[1], 10) : 0;
+
+  // Save with --exclude should redact it
+  const res2 = runCli(['save', 'excluded-save', '--exclude', 'MY_CUSTOM_VAR'], { homeDir, env });
+  assert.equal(res2.status, 0);
+  const match2 = res2.stdout.match(/Redacted (\d+) environment variables/);
+  const excludeCount = match2 ? parseInt(match2[1], 10) : 0;
+
+  assert.equal(excludeCount, normalCount + 1);
 }));
