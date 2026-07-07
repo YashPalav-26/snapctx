@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 const { Command } = require('commander');
 const { execSync } = require('child_process');
 const fs = require('fs');
@@ -64,7 +62,6 @@ function getRecentCommands() {
     }
 
     const content = fs.readFileSync(historyPath, 'utf8');
-    // zsh extended history can prefix lines with timestamps; we take raw lines as-is for v1.
     const lines = content.split('\n').filter((line) => line.trim().length > 0);
     return lines.slice(-10);
   } catch {
@@ -76,15 +73,28 @@ function collectTags(value, previous) {
   return previous.concat([value]);
 }
 
-function buildSnapshot(tags = []) {
-  return {
+function buildSnapshot(options = {}) {
+  const tags = options.tag || [];
+  const exclude = options.exclude || [];
+  const redact = options.redact !== false;
+
+  const { env, redactedCount } = storage.redactEnvironment(process.env, {
     cwd: process.cwd(),
-    env: { ...process.env },
+    exclude,
+    redact,
+  });
+
+  const snapshot = {
+    cwd: process.cwd(),
+    env,
     gitBranch: getGitBranch(process.cwd()),
     recentCommands: getRecentCommands(),
     tags,
     timestamp: new Date().toISOString(),
+    redactActive: redact,
   };
+
+  return { snapshot, redactedCount };
 }
 
 function formatDate(iso) {
@@ -135,9 +145,14 @@ function printLoadSummary(name, snapshot, currentBranch) {
   console.log(`Directory: ${snapshot.cwd}`);
   console.log(`Git branch: ${snapshot.gitBranch ?? '(none)'}`);
 
-  // Full env is preserved in the JSON file; avoid dumping it to the terminal.
   const envCount = snapshot.env ? Object.keys(snapshot.env).length : 0;
-  console.log(`Environment variables: ${envCount} saved`);
+  let redactSuffix = ' (unknown/legacy)';
+  if (snapshot.redactActive === true) {
+    redactSuffix = ' (redacted)';
+  } else if (snapshot.redactActive === false) {
+    redactSuffix = ' (unredacted)';
+  }
+  console.log(`Environment variables: ${envCount} saved${redactSuffix}`);
 
   if (snapshot.tags && snapshot.tags.length > 0) {
     console.log(`Tags: ${snapshot.tags.join(', ')}`);
@@ -192,7 +207,6 @@ function printDiffSummary(name1, snapshot1, name2, snapshot2) {
     console.log(`git branch: ${snapshot1.gitBranch ?? '(none)'} -> ${snapshot2.gitBranch ?? '(none)'}`);
   }
 
-  // Deliberately compare env keys only — values may contain secrets.
   const envDiff = compareEnvKeys(snapshot1.env, snapshot2.env);
   if (envDiff.added.length === 0 && envDiff.removed.length === 0 && envDiff.changed.length === 0) {
     console.log('env vars: unchanged');
@@ -226,7 +240,11 @@ function printDiffSummary(name1, snapshot1, name2, snapshot2) {
 }
 
 function saveAction(name, options) {
-  const snapshot = buildSnapshot(options.tag || []);
+  if (options.redact === false) {
+    console.log(colors.yellow('⚠ saving environment variables without redaction — this snapshot may contain secrets'));
+  }
+
+  const { snapshot, redactedCount } = buildSnapshot(options);
   try {
     storage.saveSnapshot(name, snapshot);
   } catch (err) {
@@ -234,6 +252,9 @@ function saveAction(name, options) {
     process.exit(1);
   }
   console.log(colors.green(`Snapshot '${name}' saved.`));
+  if (options.redact !== false) {
+    console.log(`Redacted ${redactedCount} environment variables (use --no-redact to disable).`);
+  }
 }
 
 function loadAction(name) {
@@ -306,14 +327,12 @@ function exportAction(name, options) {
   let outPath = options.out || path.join(process.cwd(), `${name}.snapctx.json`);
   outPath = path.resolve(outPath);
 
-  // Check if the resolved path is a directory; if so, use default filename inside it.
   try {
     const stats = fs.statSync(outPath);
     if (stats.isDirectory()) {
       outPath = path.join(outPath, `${name}.snapctx.json`);
     }
   } catch (err) {
-    // Path doesn't exist yet, which is fine. Check if parent directory exists.
     if (err.code !== 'ENOENT') {
       console.error(`Cannot write to '${outPath}': ${err.message}`);
       process.exit(1);
@@ -338,7 +357,6 @@ function importAction(file, options) {
   let parsed;
   try {
     const resolved = path.resolve(file);
-    // Check if path is a directory before attempting to read it as a file.
     let stats;
     try {
       stats = fs.statSync(resolved);
@@ -402,6 +420,8 @@ program
   .argument('<name>', 'snapshot name')
   .description('Save the current working context')
   .option('-t, --tag <tag>', 'tag to attach (repeatable)', collectTags, [])
+  .option('--exclude <pattern>', 'environment variable key pattern to exclude (repeatable)', collectTags, [])
+  .option('--no-redact', 'disable environment variable redaction')
   .action(saveAction);
 
 program
