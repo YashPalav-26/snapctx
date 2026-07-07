@@ -60,7 +60,7 @@ Snapshot: my-feature
 Saved: Jul 2, 2026, 10:30 AM
 Directory: /Users/dev/project
 Git branch: feature/auth
-Environment variables: 42 saved
+Environment variables: 42 saved (redacted)
 Tags: backend, urgent
 Recent commands:
   npm test
@@ -76,7 +76,47 @@ $ snapctx load missing
 No snapshot named 'missing'.
 ```
 
-The full environment variable set is stored in the JSON file under `~/.snapctx/` even though `load` only prints a count.
+The environment variable set is stored in the JSON file under `~/.snapctx/` (with sensitive keys redacted by default) even though `load` only prints a count.
+
+### Environment Variable Redaction
+
+To prevent sensitive keys (like AWS access credentials or database passwords sitting in your shell environment) from being written to plaintext files on disk, `snapctx` redacts sensitive values by default. Redacted variables are stored as `[REDACTED]` rather than completely removed, ensuring that `diff` can still track whether those variables are present.
+
+#### Default Denylist
+By default, `snapctx` matches variable names case-insensitively against common patterns, including:
+- Secrets, tokens, and passwords (`*_SECRET*`, `*_KEY*`, `*_TOKEN*`, `*PASSWORD*`, `*_PASS*`)
+- Cloud provider & database credentials (`AWS_*`, `*_CREDENTIALS*`)
+- API keys, private keys, and access keys (`*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`)
+
+#### Custom Ignore Patterns (`.snapctxignore`)
+You can add custom patterns to exclude other environment variables. `snapctx` reads ignore patterns from:
+1. `~/.snapctx/.snapctxignore` (global user defaults)
+2. `./.snapctxignore` (project-specific overrides)
+
+Both lists are merged if both exist. The file format is one wildcard glob-style pattern per line (e.g. `MY_APP_*`), with `#` indicating comments:
+
+```text
+# Exclude my application runtime configs
+MY_APP_CONF_*
+STAGING_DB_*
+```
+
+#### CLI Exclusions and Opt-out
+- Use `--exclude <pattern>` to add one-off exclusions:
+  ```bash
+  $ snapctx save debug-session --exclude DEBUG_LOGS
+  Snapshot 'debug-session' saved.
+  Redacted 3 environment variables (use --no-redact to disable).
+  ```
+- Use `--no-redact` to disable redaction entirely. This prints a visible security warning to ensure it's not run by mistake:
+  ```bash
+  $ snapctx save raw-session --no-redact
+  ⚠ saving environment variables without redaction — this snapshot may contain secrets
+  Snapshot 'raw-session' saved.
+  ```
+
+> [!NOTE]
+> Environment variable redaction is a best-effort heuristic and does not guarantee complete security. Always handle highly sensitive secrets with care.
 
 ### Delete a snapshot
 
