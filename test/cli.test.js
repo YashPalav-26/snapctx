@@ -331,3 +331,228 @@ test('cli: --exclude adds a one-off exclusion pattern', withTempHome(async (t, {
 
   assert.equal(excludeCount, normalCount + 1);
 }));
+
+// ── restore command tests ─────────────────────────────────────────────────────
+
+test('restore: outputs valid POSIX shell syntax for bash target', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    NODE_ENV: 'production',
+    PORT: '3000',
+    SAFE_VAR: 'hello',
+  };
+  runCli(['save', 'posix-snap'], { homeDir, env });
+
+  const result = runCli(['restore', 'posix-snap', '--shell', 'bash'], { homeDir, env });
+  assert.equal(result.status, 0);
+  // stdout must contain a cd line for the POSIX shell
+  assert.match(result.stdout, /^cd '/m);
+  // stdout must contain export lines
+  assert.match(result.stdout, /^export NODE_ENV=/m);
+  assert.match(result.stdout, /^export PORT=/m);
+  assert.match(result.stdout, /^export SAFE_VAR=/m);
+  // No human-facing messages in stdout
+  assert.doesNotMatch(result.stdout, /Snapshot:/);
+  assert.doesNotMatch(result.stdout, /Saved:/);
+}));
+
+test('restore: outputs valid PowerShell syntax for powershell target', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    NODE_ENV: 'production',
+    PORT: '3000',
+  };
+  runCli(['save', 'ps-snap'], { homeDir, env });
+
+  const result = runCli(['restore', 'ps-snap', '--shell', 'powershell'], { homeDir, env });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Set-Location -LiteralPath '/m);
+  assert.match(result.stdout, /^\$env:NODE_ENV = '/m);
+  assert.match(result.stdout, /^\$env:PORT = '/m);
+  // No human-facing messages in stdout
+  assert.doesNotMatch(result.stdout, /Snapshot:/);
+}));
+
+test('restore: values with spaces, double-quotes, $, and backticks are safely escaped in POSIX', withTempHome(async (t, { homeDir }) => {
+  delete require.cache[require.resolve('../lib/storage')];
+  process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
+  const storage = require('../lib/storage');
+
+  // Craft a snapshot manually so we can put special characters directly in env values
+  // without them going through the real redaction rules (these key names are safe).
+  const specialSnapshot = {
+    cwd: '/tmp/path with spaces',
+    env: {
+      SPACED: 'hello world',
+      QUOTED: 'say "hello"',
+      DOLLAR: 'price is $5.00',
+      BACKTICK: 'use `backticks`',
+      SINGLE_Q: "it's a test",
+    },
+    gitBranch: null,
+    recentCommands: [],
+    tags: [],
+    timestamp: new Date().toISOString(),
+    redactActive: true,
+  };
+  storage.saveSnapshot('special-chars', specialSnapshot);
+
+  const result = runCli(['restore', 'special-chars', '--shell', 'bash'], { homeDir });
+  assert.equal(result.status, 0);
+
+  // cd line — path with spaces must be single-quoted
+  assert.match(result.stdout, /^cd '\/tmp\/path with spaces'$/m);
+
+  // SPACED: spaces are safe inside single quotes, no escaping needed
+  assert.match(result.stdout, /^export SPACED='hello world'$/m);
+
+  // QUOTED: double-quotes are safe inside single quotes
+  assert.match(result.stdout, /^export QUOTED='say "hello"'$/m);
+
+  // DOLLAR: $ is safe inside single quotes — cannot trigger variable expansion
+  assert.match(result.stdout, /^export DOLLAR='price is \$5\.00'$/m);
+
+  // BACKTICK: backticks are safe inside single quotes — cannot trigger command substitution
+  assert.match(result.stdout, /^export BACKTICK='use `backticks`'$/m);
+
+  // SINGLE_Q: the internal single quote must be escaped as '\'' (close-quote, backslash-quote, re-open)
+  // The actual output line is: export SINGLE_Q='it'\''s a test'
+  // In the raw string: 'it' then \' then 's a test'
+  // We use a RegExp constructor here because the '\'' sequence in a regex literal is tricky
+  // to reason about — this makes the expected pattern explicit.
+  assert.ok(
+    /^export SINGLE_Q='it'\\''s a test'$/m.test(result.stdout),
+    `Expected SINGLE_Q to be escaped as 'it'\\''s a test', got: ${result.stdout}`,
+  );
+}));
+
+test("restore: values with single quotes are escaped correctly for PowerShell (doubled '')", withTempHome(async (t, { homeDir }) => {
+  delete require.cache[require.resolve('../lib/storage')];
+  process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
+  const storage = require('../lib/storage');
+
+  const specialSnapshot = {
+    cwd: "C:\\Users\\O'Brien",
+    env: {
+      SINGLE_Q: "it's here",
+      DOLLAR: 'price is $5.00',
+    },
+    gitBranch: null,
+    recentCommands: [],
+    tags: [],
+    timestamp: new Date().toISOString(),
+    redactActive: true,
+  };
+  storage.saveSnapshot('ps-special', specialSnapshot);
+
+  const result = runCli(['restore', 'ps-special', '--shell', 'powershell'], { homeDir });
+  assert.equal(result.status, 0);
+
+  // Path with single quote — must double the single quote
+  assert.match(result.stdout, /^Set-Location -LiteralPath 'C:\\Users\\O''Brien'$/m);
+
+  // Single quote in value — must be doubled
+  assert.match(result.stdout, /^\$env:SINGLE_Q = 'it''s here'$/m);
+
+  // Dollar sign — must NOT trigger PowerShell variable expansion (safe inside single quotes)
+  assert.match(result.stdout, /^\$env:DOLLAR = 'price is \$5\.00'$/m);
+}));
+
+test('restore: --cwd-only outputs only the cd line, not env vars', withTempHome(async (t, { homeDir }) => {
+  const env = { NODE_ENV: 'development', SAFE_VAR: 'yes' };
+  runCli(['save', 'partial-snap'], { homeDir, env });
+
+  const result = runCli(['restore', 'partial-snap', '--shell', 'bash', '--cwd-only'], { homeDir, env });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^cd '/m);
+  assert.doesNotMatch(result.stdout, /^export /m);
+}));
+
+test('restore: --env-only outputs only env var lines, not cd', withTempHome(async (t, { homeDir }) => {
+  const env = { NODE_ENV: 'development', SAFE_VAR: 'yes' };
+  runCli(['save', 'env-only-snap'], { homeDir, env });
+
+  const result = runCli(['restore', 'env-only-snap', '--shell', 'bash', '--env-only'], { homeDir, env });
+  assert.equal(result.status, 0);
+  assert.doesNotMatch(result.stdout, /^cd /m);
+  assert.match(result.stdout, /^export /m);
+}));
+
+test('restore: passing both --cwd-only and --env-only fails clearly', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'conflict-snap'], { homeDir });
+
+  const result = runCli(['restore', 'conflict-snap', '--cwd-only', '--env-only'], { homeDir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /mutually exclusive/);
+  // stdout must remain empty — don't emit anything eval-able on failure
+  assert.equal(result.stdout.trim(), '');
+}));
+
+test('restore: redaction-saved snapshot does not output [REDACTED] values', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    AWS_SECRET_ACCESS_KEY: 'supersecret',
+    SAFE_VAR: 'safe_value',
+  };
+  // Default save applies redaction: AWS_SECRET_ACCESS_KEY gets stored as [REDACTED]
+  runCli(['save', 'redacted-snap'], { homeDir, env });
+
+  const result = runCli(['restore', 'redacted-snap', '--shell', 'bash'], { homeDir, env });
+  assert.equal(result.status, 0);
+
+  // The value '[REDACTED]' must NOT appear literally in the output
+  assert.doesNotMatch(result.stdout, /\[REDACTED\]/);
+  // The key itself must NOT appear as an export (its value would be [REDACTED])
+  assert.doesNotMatch(result.stdout, /export AWS_SECRET_ACCESS_KEY=/);
+
+  // Safe vars should still be exported
+  assert.match(result.stdout, /export SAFE_VAR=/);
+}));
+
+test('restore: --no-redact snapshot prints warning to stderr, never to stdout', withTempHome(async (t, { homeDir }) => {
+  const env = {
+    AWS_SECRET_ACCESS_KEY: 'supersecret',
+    SAFE_VAR: 'safe_value',
+  };
+  // Save without redaction
+  runCli(['save', 'raw-snap', '--no-redact'], { homeDir, env });
+
+  const result = runCli(['restore', 'raw-snap', '--shell', 'bash'], { homeDir, env });
+  assert.equal(result.status, 0);
+
+  // Warning must appear on stderr
+  assert.match(result.stderr, /saved without redaction/);
+  assert.match(result.stderr, /may contain secrets/);
+
+  // Warning must NOT appear on stdout — stdout must stay eval-safe
+  assert.doesNotMatch(result.stdout, /saved without redaction/);
+  assert.doesNotMatch(result.stdout, /may contain secrets/);
+
+  // Unredacted snapshot exports everything, including the secret key
+  assert.match(result.stdout, /export AWS_SECRET_ACCESS_KEY=/);
+}));
+
+test('restore: nonexistent snapshot fails clearly with non-zero exit and empty stdout', withTempHome(async (t, { homeDir }) => {
+  const result = runCli(['restore', 'does-not-exist'], { homeDir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No snapshot named 'does-not-exist'/);
+  // stdout must be empty — nothing eval-able must be emitted on failure
+  assert.equal(result.stdout.trim(), '');
+}));
+
+test('restore: cmd.exe target is rejected with a clear stderr message', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'cmd-snap'], { homeDir });
+
+  const result = runCli(['restore', 'cmd-snap', '--shell', 'cmd'], { homeDir });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cmd\.exe is not supported/);
+  assert.match(result.stderr, /PowerShell/);
+  assert.equal(result.stdout.trim(), '');
+}));
+
+test('load: includes tip hint pointing to restore command', withTempHome(async (t, { homeDir }) => {
+  runCli(['save', 'tip-snap'], { homeDir });
+  const result = runCli(['load', 'tip-snap'], { homeDir });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /snapctx restore tip-snap/);
+  assert.match(result.stdout, /eval/);
+}));
