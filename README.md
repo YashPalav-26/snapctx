@@ -78,6 +78,93 @@ No snapshot named 'missing'.
 
 The environment variable set is stored in the JSON file under `~/.snapctx/` (with sensitive keys redacted by default) even though `load` only prints a count.
 
+`load` also prints a one-line tip showing you the `restore` command to re-apply this snapshot to your live shell — see below.
+
+### Restore a snapshot into your shell
+
+Because a Node.js child process cannot change its parent shell's working directory or environment variables, `restore` works by **printing** a shell script to stdout that your shell then evaluates. Nothing is injected automatically — you control when and whether to run it.
+
+#### bash / zsh
+
+```bash
+eval "$(snapctx restore my-feature)"
+```
+
+#### PowerShell
+
+```powershell
+snapctx restore my-feature | Invoke-Expression
+```
+
+#### What the generated script looks like before eval
+
+```bash
+# bash/zsh output (safe to inspect before running)
+cd '/Users/dev/project'
+export NODE_ENV='production'
+export PORT='3000'
+export SAFE_VAR='hello world'
+```
+
+```powershell
+# PowerShell output
+Set-Location -LiteralPath 'C:\Users\dev\project'
+$env:NODE_ENV = 'production'
+$env:PORT = '3000'
+$env:SAFE_VAR = 'hello world'
+```
+
+All values are single-quoted with internal single quotes properly escaped, so characters like `$`, `` ` ``, `"`, and `;` cannot inject commands into the evaluated output.
+
+#### Partial restore
+
+```bash
+# Restore only the working directory, skip env vars
+eval "$(snapctx restore my-feature --cwd-only)"
+
+# Restore only environment variables, skip cwd
+eval "$(snapctx restore my-feature --env-only)"
+```
+
+#### Shell override
+
+```bash
+# Force a specific shell syntax (auto-detected by default)
+snapctx restore my-feature --shell bash
+snapctx restore my-feature --shell zsh
+snapctx restore my-feature --shell powershell
+```
+
+> [!NOTE]
+> `cmd.exe` is not supported because its quoting rules make safe generation impractical. Use PowerShell (`--shell powershell`) on Windows.
+
+#### Redaction and secrets
+
+If the snapshot was saved with redaction active (the default), `restore` will not output any redacted variables — they were never stored to begin with. If the snapshot was saved with `--no-redact`, a warning is printed to stderr:
+
+```
+⚠ this snapshot was saved without redaction and may contain secrets
+```
+
+The warning goes to stderr so it doesn't corrupt the eval-able stdout stream.
+
+#### Optional shell alias (set up yourself)
+
+Power users can add a convenience alias to their shell config. This is **not installed automatically** — add it yourself if you want it:
+
+```bash
+# In ~/.bashrc or ~/.zshrc
+alias snaprestore='eval "$(snapctx restore)"'
+
+# Usage: snaprestore my-feature
+```
+
+```powershell
+# In $PROFILE (PowerShell)
+function snaprestore { snapctx restore $args | Invoke-Expression }
+```
+
+
 ### Environment Variable Redaction
 
 To prevent sensitive keys (like AWS access credentials or database passwords sitting in your shell environment) from being written to plaintext files on disk, `snapctx` redacts sensitive values by default. Redacted variables are stored as `[REDACTED]` rather than completely removed, ensuring that `diff` can still track whether those variables are present.
