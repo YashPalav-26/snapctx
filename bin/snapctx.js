@@ -173,6 +173,8 @@ function printLoadSummary(name, snapshot, currentBranch) {
       `⚠ Branch mismatch: snapshot was on '${savedBranch}', currently on '${currentBranch}'`,
     ));
   }
+
+  console.log(`Tip: run \`eval "$(snapctx restore ${name})"\` to apply this snapshot's cwd and env to your current shell.`);
 }
 
 function compareEnvKeys(left, right) {
@@ -266,6 +268,155 @@ function loadAction(name) {
 
   const currentBranch = getGitBranch(process.cwd());
   printLoadSummary(name, snapshot, currentBranch);
+}
+
+/**
+ * Escapes a value to prevent command injection when evaluated in POSIX shells (bash, zsh).
+ *
+ * Security Design:
+ * - We wrap the entire string in single quotes: 'VALUE'.
+ * - POSIX shells treat everything inside single quotes literally (no variable expansion,
+ *   no backtick execution, no command substitution).
+ * - The only character that cannot appear inside a single-quoted string is the single quote itself.
+ * - To represent a single quote inside single quotes, we must close the current single-quoted string ('),
+ *   provide an escaped single quote (\'), and then open a new single-quoted string (').
+ *   Thus, any literal ' in the value is replaced by '\''.
+ * - For example, if value is: hello'world; $(evil)
+ *   It becomes: 'hello'\''world; $(evil)'
+ *   This evaluates to the literal string: hello'world; $(evil)
+ * - This prevents all command injection attacks, as any shell-meaningful characters ($, `, ;, |, etc.)
+ *   remain strictly bound inside the outer single quotes.
+ */
+function escapePosix(val) {
+  return "'" + val.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Escapes a value to prevent command injection when evaluated in PowerShell (Invoke-Expression).
+ *
+ * Security Design:
+ * - We wrap the entire string in single quotes: 'VALUE'.
+ * - PowerShell treats single-quoted strings as literal/verbatim (no variable expansion like $var,
+ *   no command substitution like $(...), and no escape characters like `).
+ * - The only character that has special meaning inside a PowerShell single-quoted string is the
+ *   single quote itself.
+ * - To represent a single quote inside a PowerShell single-quoted string, it must be doubled: ''.
+ * - For example, if value is: hello'world; $(evil)
+ *   It becomes: 'hello''world; $(evil)'
+ *   This evaluates to the literal string: hello'world; $(evil)
+ * - This ensures that command execution or variable interpolation cannot be triggered during evaluation.
+ */
+function escapePowerShell(val) {
+  return "'" + val.replace(/'/g, "''") + "'";
+}
+
+function getShell(options) {
+  if (options.shell) {
+    return options.shell.toLowerCase();
+  }
+
+  const envShell = process.env.SHELL || '';
+  if (envShell.includes('zsh')) {
+    return 'zsh';
+  }
+  if (envShell.includes('bash')) {
+    return 'bash';
+  }
+
+  // Match the history-based shell detection logic
+  const zshHistory = path.join(os.homedir(), '.zsh_history');
+  const bashHistory = path.join(os.homedir(), '.bash_history');
+  if (fs.existsSync(zshHistory)) {
+    return 'zsh';
+  }
+  if (fs.existsSync(bashHistory)) {
+    return 'bash';
+  }
+
+  const appdata = process.env.APPDATA;
+  if (appdata) {
+    const psReadLineHistory = path.join(
+      appdata,
+      'Microsoft',
+      'Windows',
+      'PowerShell',
+      'PSReadLine',
+      'ConsoleHost_history.txt',
+    );
+    if (fs.existsSync(psReadLineHistory)) {
+      return 'powershell';
+    }
+  }
+
+  if (os.platform() === 'win32') {
+    return 'powershell';
+  }
+  return 'bash';
+}
+
+function restoreAction(name, options) {
+  if (options.cwdOnly && options.envOnly) {
+    console.error('Error: --cwd-only and --env-only are mutually exclusive.');
+    process.exit(1);
+  }
+
+  const snapshot = storage.loadSnapshot(name);
+  if (!snapshot) {
+    console.error(`No snapshot named '${name}'.`);
+    process.exit(1);
+  }
+
+  const targetShell = getShell(options);
+
+  if (targetShell === 'cmd') {
+    // cmd.exe is explicitly rejected because:
+    // 1. It lacks a direct native equivalent to `eval` / `Invoke-Expression` for piping stdout directly into the parent process environment.
+    // 2. Its quoting and escaping rules are extremely complex and brittle (e.g. handling characters like %, ^, &, <, >, |), which makes it highly prone to command injection vulnerabilities when evaluating generated scripts.
+    // 3. PowerShell is widely available on Windows and provides a much safer and cleaner alternative.
+    console.error('Error: cmd.exe is not supported for restoring snapshots. Please use PowerShell instead.');
+    process.exit(1);
+  }
+
+  if (targetShell !== 'bash' && targetShell !== 'zsh' && targetShell !== 'powershell') {
+    console.error(`Error: Unsupported shell '${targetShell}'. Valid shells are bash, zsh, powershell.`);
+    process.exit(1);
+  }
+
+  // Print warning to stderr if snapshot was saved without redaction
+  if (snapshot.redactActive === false) {
+    console.error('⚠ this snapshot was saved without redaction and may contain secrets');
+  }
+
+  const outputLines = [];
+
+  const doCwd = !options.envOnly;
+  const doEnv = !options.cwdOnly;
+
+  if (doCwd && snapshot.cwd) {
+    if (targetShell === 'powershell') {
+      // Set-Location -LiteralPath is used to prevent PowerShell from interpreting square brackets/wildcards
+      outputLines.push(`Set-Location -LiteralPath ${escapePowerShell(snapshot.cwd)}`);
+    } else {
+      outputLines.push(`cd ${escapePosix(snapshot.cwd)}`);
+    }
+  }
+
+  if (doEnv && snapshot.env) {
+    for (const [key, value] of Object.entries(snapshot.env)) {
+      if (value === '[REDACTED]') {
+        continue;
+      }
+      if (targetShell === 'powershell') {
+        outputLines.push(`$env:${key} = ${escapePowerShell(value)}`);
+      } else {
+        outputLines.push(`export ${key}=${escapePosix(value)}`);
+      }
+    }
+  }
+
+  if (outputLines.length > 0) {
+    console.log(outputLines.join('\n'));
+  }
 }
 
 function listAction(options) {
@@ -429,6 +580,15 @@ program
   .argument('<name>', 'snapshot name')
   .description('Load and display a saved snapshot')
   .action(loadAction);
+
+program
+  .command('restore')
+  .argument('<name>', 'snapshot name')
+  .description('Restore a saved snapshot into the shell')
+  .option('--shell <shell>', 'explicit shell override (bash, zsh, powershell, cmd)')
+  .option('--cwd-only', 'output only the cwd restore command')
+  .option('--env-only', 'output only the env restore commands')
+  .action(restoreAction);
 
 program
   .command('list')
