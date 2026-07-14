@@ -2,7 +2,8 @@
 
 ## What snapctx actually is
 
-snapctx is a small command-line tool that saves a snapshot of your terminal's current state: your working directory, git branch, environment variables, and recent shell command history. Think of it as a bookmark for your terminal session. Instead of trying to remember where you were and what you'd just been doing, you save it once and look it up later.
+snapctx is a small command-line tool that saves a snapshot of your terminal's current state: your working directory, git branch, environment variables, and recent shell command history (plus optional tags). Think of it as a bookmark for your terminal session. Instead of trying to remember where you were and what you'd just been doing, you save it once and look it up later.
+
 
 ## Why you'd actually want this
 
@@ -23,11 +24,12 @@ snapctx/
 ├── bin/
 │   └── snapctx.js          # The CLI entrypoint that actually talks to the user.
 ├── lib/
-│   ├── storage.js          # Reads and writes snapshot JSON files to ~/.snapctx.
-│   └── colors.js           # Minimal ANSI color helpers, skipped if NO_COLOR is set.
+│   ├── storage.js          # Persists snapshot JSON files under ~/.snapctx.
+│   ├── colors.js           # Minimal ANSI color helpers, respects NO_COLOR.
+│   └── redaction.js       # Heuristic env var redaction + .snapctxignore support.
 ├── test/
 │   ├── cli.test.js         # End-to-end tests that run the CLI as a subprocess.
-│   ├── storage.test.js     # Unit tests for the storage module.
+│   ├── storage.test.js     # Unit tests for the storage/redaction modules.
 │   ├── fixtures/
 │   │   └── old-format.json # Snapshots saved before the tags field existed.
 │   └── helpers/
@@ -40,7 +42,9 @@ snapctx/
 └── package.json
 ```
 
+
 - **`bin/snapctx.js`** — This is the only file that prints to your terminal. It handles all command-line arguments, formats the output, and exits with the right status codes. It holds the logic for collecting the current context, building a snapshot object, and running the various commands.
+
 
 - **`lib/storage.js`** — This module only knows how to persist and retrieve snapshot files. It has no idea what a terminal or a git branch is. The separation means you can change how snapshots are stored (flat files in `~/.snapctx` right now) without touching any CLI code. It also makes the module easy to test without involving the terminal at all.
 
@@ -69,6 +73,16 @@ $ snapctx save my-feature -t backend -t urgent
 Snapshot 'my-feature' saved.
 ```
 
+By default, sensitive environment variables (e.g. `AWS_*`, `*_SECRET*`, `*_KEY*`) are **redacted** — their values are stored as `[REDACTED]` rather than written to disk in plain text. Use `--exclude <pattern>` to add ad-hoc exclusions or `.snapctxignore` for persistent patterns (one glob pattern per line, `#` for comments). Use `--no-redact` to disable redaction entirely:
+
+```bash
+$ snapctx save raw-session --no-redact
+⚠ saving environment variables without redaction — this snapshot may contain secrets
+Snapshot 'raw-session' saved.
+```
+
+When redaction is active, `save` prints a count of redacted variables.
+
 ### `load` — Load and display a saved snapshot
 
 View everything stored in a snapshot. This does not change your shell environment; it just prints the details so you can recreate the state yourself.
@@ -79,15 +93,17 @@ Snapshot: my-feature
 Saved: Jul 2, 2026, 10:30 AM
 Directory: /Users/dev/project
 Git branch: feature/auth
-Environment variables: 42 saved
+Environment variables: 42 saved (redacted)
 Tags: backend, urgent
 Recent commands:
   npm test
   git checkout -b feature/auth
   npm install
+
+Tip: run `eval "$(snapctx restore my-feature)"` to apply this snapshot's cwd and env to your current shell.
 ```
 
-If the snapshot was saved on a different branch than your current one, you'll see a warning:
+If the snapshot was saved on a different branch than your current one, you'll see this additional warning at the end:
 
 ```bash
 ⚠ Branch mismatch: snapshot was on 'feature/auth', currently on 'main'
@@ -98,6 +114,55 @@ If the snapshot doesn't exist:
 ```bash
 $ snapctx load missing
 No snapshot named 'missing'.
+```
+
+### `restore` — Re-apply a snapshot to your live shell
+
+Because a Node.js child process cannot change its parent shell's working directory or environment variables, `restore` works by **printing** a shell script to stdout that your shell then evaluates. Nothing is injected automatically — you control when and whether to run it.
+
+**bash / zsh:**
+
+```bash
+eval "$(snapctx restore my-feature)"
+```
+
+**PowerShell:**
+
+```powershell
+snapctx restore my-feature | Invoke-Expression
+```
+
+Under the hood, `restore` generates `cd`/`Set-Location` and `export`/`$env:` lines with proper escaping to prevent command injection. All values are single-quoted with internal single quotes properly escaped, so characters like `$`, `` ` ``, `"`, and `;` are safe.
+
+#### Partial restore
+
+```bash
+# Restore only the working directory, skip env vars
+eval "$(snapctx restore my-feature --cwd-only)"
+
+# Restore only environment variables, skip cwd
+eval "$(snapctx restore my-feature --env-only)"
+```
+
+#### Shell override
+
+By default `restore` auto-detects your shell from `$SHELL` or shell history files. You can override:
+
+```bash
+snapctx restore my-feature --shell bash
+snapctx restore my-feature --shell zsh
+snapctx restore my-feature --shell powershell
+```
+
+> [!NOTE]
+> `cmd.exe` is not supported because its quoting rules make safe generation impractical. Use PowerShell (`--shell powershell`) on Windows.
+
+#### Redaction and secrets
+
+If the snapshot was saved with redaction active (the default), `restore` skips any redacted variables. If the snapshot was saved with `--no-redact`, a warning is printed to stderr so it doesn't corrupt the eval-able stdout:
+
+```
+⚠ this snapshot was saved without redaction and may contain secrets
 ```
 
 ### `list` — List all saved snapshots
@@ -194,7 +259,10 @@ Malformed or incomplete snapshot files are rejected with a clear error listing t
 
 ## Using snapctx across multiple projects
 
-Snapshots live in a single shared folder at `~/.snapctx`. They are not tied to any single project directory. This is by design, but it means you need to name your snapshots carefully or they will collide.
+Snapshots live in a single shared folder at `~/.snapctx`. The CLI persists each snapshot as an individual JSON file there.
+
+They are not tied to any single project directory. This is by design, but it means you need to name your snapshots carefully or they will collide.
+
 
 ### Naming snapshots so they don't collide
 
@@ -299,7 +367,13 @@ Save before a long weekend, load on Monday. It sounds obvious, but it's the diff
 | Command | What it does | Example |
 | ------- | ------------ | ------- |
 | `save <name>` | Save current context snapshot | `snapctx save fix-422 -t backend` |
+| `save --no-redact` | Disable env var redaction | `snapctx save raw --no-redact` |
+| `save --exclude <pat>` | Exclude env vars matching a pattern | `snapctx save debug --exclude DEBUG_*` |
 | `load <name>` | Display a saved snapshot | `snapctx load fix-422` |
+| `restore <name>` | Print eval-able shell script to re-apply snapshot | `eval "$(snapctx restore fix-422)"` |
+| `restore --cwd-only` | Restore only the working directory | `snapctx restore fix-422 --cwd-only` |
+| `restore --env-only` | Restore only environment variables | `snapctx restore fix-422 --env-only` |
+| `restore --shell <s>` | Force a specific shell syntax | `snapctx restore fix-422 --shell powershell` |
 | `list` | List all saved snapshots | `snapctx list` |
 | `list --tag <tag>` | List snapshots with a specific tag | `snapctx list --tag urgent` |
 | `delete <name>` | Delete a saved snapshot | `snapctx delete fix-422` |
@@ -307,4 +381,6 @@ Save before a long weekend, load on Monday. It sounds obvious, but it's the diff
 | `search <query>` | Search by name, tag, cwd, or branch | `snapctx search auth` |
 | `diff <a> <b>` | Compare two snapshots | `snapctx diff before after` |
 | `export <name>` | Export a snapshot to JSON | `snapctx export fix-422` |
+| `export -o <path>` | Export to a custom path | `snapctx export fix-422 -o /tmp/out.json` |
 | `import <file>` | Import a snapshot JSON file | `snapctx import ./fix-422.snapctx.json --as copy` |
+| `import --force` | Overwrite an existing snapshot on import | `snapctx import ./fix-422.snapctx.json --as copy --force` |

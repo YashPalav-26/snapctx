@@ -67,6 +67,7 @@ Recent commands:
   git checkout -b feature/auth
   npm install
 ⚠ Branch mismatch: snapshot was on 'feature/auth', currently on 'main'
+Tip: run `eval "$(snapctx restore my-feature)"` to apply this snapshot's cwd and env to your current shell.
 ```
 
 If the snapshot does not exist:
@@ -77,8 +78,6 @@ No snapshot named 'missing'.
 ```
 
 The environment variable set is stored in the JSON file under `~/.snapctx/` (with sensitive keys redacted by default) even though `load` only prints a count.
-
-`load` also prints a one-line tip showing you the `restore` command to re-apply this snapshot to your live shell — see below.
 
 ### Restore a snapshot into your shell
 
@@ -163,7 +162,6 @@ alias snaprestore='eval "$(snapctx restore)"'
 # In $PROFILE (PowerShell)
 function snaprestore { snapctx restore $args | Invoke-Expression }
 ```
-
 
 ### Environment Variable Redaction
 
